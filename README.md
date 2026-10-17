@@ -421,7 +421,7 @@ The rule for contributors: **product rules go in `src/logic/`, not in components
 
 ## Run it locally
 
-Requires Node.js 20+.
+Requires Node.js 22.12 or newer (`.nvmrc` pins 22). Vitest and the Capacitor CLI don't run on Node 20.
 
 ```bash
 npm install
