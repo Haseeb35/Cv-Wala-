@@ -4,22 +4,72 @@ import cors from "cors";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { aiEnabled, improveBullets, writeLetter } from "./ai";
+import { APP_ORIGINS, clientKey, createDailyBudget, createLimiter, isAllowedOrigin, parseOrigins } from "./guard";
 
 const app = express();
-app.use(cors()); // the iOS/Android apps call from capacitor:// and https://localhost origins
+
+/** A positive number from the environment, or the default. */
+const setting = (name: string, fallback: number) => {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+// On a host behind a proxy (Render, Railway, Fly, Nginx…) every request seems
+// to come from the proxy, so all visitors would share one limit. TRUST_PROXY=1
+// (one proxy in front) makes Express read the real address from X-Forwarded-For.
+// Only set it when there really is a proxy: otherwise the header can be faked.
+const trustProxy = process.env.TRUST_PROXY;
+if (trustProxy) app.set("trust proxy", trustProxy === "true" ? true : /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+
+// Who may call the API from a browser: the site this server hosts (same host),
+// the iOS/Android apps, and any extra sites in ALLOWED_ORIGINS.
+const allowedOrigins = [...APP_ORIGINS, ...parseOrigins(process.env.ALLOWED_ORIGINS)];
+const originOk = (req: express.Request) => isAllowedOrigin(req.header("origin"), req.header("host"), allowedOrigins);
+
+app.use(cors((req, done) => done(null, { origin: originOk(req as express.Request) })));
 app.use(express.json({ limit: "64kb" }));
 
-// Simple per-IP limit so a public deployment can't drain the API key.
-const hits = new Map<string, { n: number; reset: number }>();
+// CORS alone only hides the answer from other websites; the AI call would
+// still run and cost money. So requests from other sites are refused outright.
 app.use("/api", (req, res, next) => {
-  if (req.method === "GET") return next();
-  const ip = req.ip ?? "unknown";
+  if (originOk(req)) return next();
+  res.status(403).json({ error: "This server only answers the CV Wala app." });
+});
+
+// Limits on the AI buttons: per visitor (per minute and per day) and one
+// ceiling for everyone together, which caps the daily bill even if someone
+// spreads requests over many addresses.
+const perMinute = createLimiter({ windowMs: 60_000, max: setting("AI_PER_MINUTE", 5) });
+const perDay = createLimiter({ windowMs: 24 * 60 * 60_000, max: setting("AI_PER_DAY", 40) });
+const dailyBudget = createDailyBudget(setting("AI_DAILY_BUDGET", 300));
+setInterval(() => {
+  perMinute.sweep();
+  perDay.sweep();
+}, 10 * 60_000).unref();
+
+const tooMany = (res: express.Response, retryAfterSec: number, error: string) => {
+  res.set("Retry-After", String(retryAfterSec));
+  res.status(429).json({ error });
+};
+
+app.use("/api", (req, res, next) => {
+  if (req.method !== "POST") return next();
+  const key = clientKey(req.ip);
   const now = Date.now();
-  const h = hits.get(ip);
-  if (!h || h.reset < now) hits.set(ip, { n: 1, reset: now + 10 * 60_000 });
-  else if (++h.n > 40) return res.status(429).json({ error: "Too many requests. Please wait a few minutes." });
+  const today = perDay.hit(key, now, false);
+  if (!today.ok) return tooMany(res, today.retryAfterSec, "You've used the AI helper a lot today. It will be back tomorrow; everything else still works.");
+  const minute = perMinute.hit(key, now);
+  if (!minute.ok) return tooMany(res, minute.retryAfterSec, "Please wait a minute before asking the AI again.");
+  perDay.hit(key, now);
   next();
 });
+
+/** Spend one call from today's budget, or answer that the AI is resting. */
+const spend = (res: express.Response) => {
+  if (!aiEnabled || dailyBudget.take()) return true; // without a key nothing is spent
+  res.status(503).json({ error: "The AI helper is resting for today. Everything else in CV Wala still works." });
+  return false;
+};
 
 const str = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : "");
 
@@ -31,6 +81,7 @@ app.post("/api/improve", async (req, res, next) => {
   try {
     const bullets = Array.isArray(req.body?.bullets) ? req.body.bullets.map((b: unknown) => str(b, 300)).filter(Boolean).slice(0, 8) : [];
     if (!bullets.length) return res.status(400).json({ error: "Add at least one point." });
+    if (!spend(res)) return;
     res.json(await improveBullets(bullets, str(req.body?.jobTitle, 80)));
   } catch (e) {
     next(e);
@@ -42,6 +93,7 @@ app.post("/api/letter", async (req, res, next) => {
     const cv = req.body?.cv;
     const letter = req.body?.letter;
     if (!cv || !letter) return res.status(400).json({ error: "CV and job details are required." });
+    if (!spend(res)) return;
     res.json(await writeLetter(JSON.stringify(cv).slice(0, 12000), JSON.stringify(letter).slice(0, 6000)));
   } catch (e) {
     next(e);
