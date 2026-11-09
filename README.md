@@ -41,6 +41,7 @@ Web app (installable PWA) · iPhone app · Android app. All three are built from
 - [Deploy](#deploy)
 - [Tests](#tests)
 - [Known limits](#known-limits)
+- [License](#license)
 
 ---
 
@@ -341,7 +342,7 @@ With an `ANTHROPIC_API_KEY` on the server, two extra buttons appear:
 
 They use Claude (`claude-opus-5-5`) with structured output.
 - **The key stays on the server.** The app never sees it.
-- Each IP address is limited to 40 requests per 10 minutes.
+- **Limits keep the bill small:** each visitor gets 5 AI requests a minute and 40 a day, and there is a ceiling of 300 for everyone together each day. Only the CV Wala app and its own site can use the API; other websites are refused.
 - **Without a key, the AI buttons are hidden** and everything else works the same.
 
 ---
@@ -460,6 +461,18 @@ npm run android                 # open in Android Studio
 
 `npm run build && npm start` runs one Node server that serves the web app and the API. Set `ANTHROPIC_API_KEY` (optional) and `PORT` in the environment. Never put the key in a `VITE_` variable, because those are built into the app that users download.
 
+Before you put the key on a public server, check these settings (see `.env.example`):
+
+| Setting | What it does | Default |
+|---|---|---|
+| `ALLOWED_ORIGINS` | Extra web addresses allowed to call the API, comma-separated. Needed only if the web app is on a different domain from the server. The iOS and Android apps are always allowed. | none |
+| `TRUST_PROXY` | Set to `1` on hosts that put a proxy in front of your app (Render, Railway, Fly, Nginx), so each visitor is limited separately. Leave it empty when there is no proxy. | off |
+| `AI_PER_MINUTE` | AI requests one visitor can make per minute. | 5 |
+| `AI_PER_DAY` | AI requests one visitor can make per day. | 40 |
+| `AI_DAILY_BUDGET` | AI requests for everyone together per day (UTC). This caps the worst-case bill. | 300 |
+
+IPv6 visitors are counted per network (/64), so changing address doesn't reset their limit. When a limit is reached the app shows a friendly message, and everything except the AI buttons keeps working.
+
 ---
 
 ## Tests
@@ -495,3 +508,9 @@ npm test
 - **Email attachments:** "Open email" can't attach the PDFs. Download them and attach them yourself.
 - **Earlier versions** leave out the photo to save space. Restoring keeps your current photo.
 - **iOS builds** need a Mac with full Xcode.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Abdul Haseeb Dar
